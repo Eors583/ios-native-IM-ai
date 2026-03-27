@@ -39,9 +39,27 @@ final class SocketManager {
 
                 listener.newConnectionHandler = { [weak self] newConn in
                     guard let self else { return }
-                    self.attachPeer(newConn)
-                    self.listener?.cancel()
-                    self.listener = nil
+                    // 服务端 accept 到的 NWConnection 需要 start，并等到 ready 才算真正 connected
+                    newConn.stateUpdateHandler = { [weak self] state in
+                        guard let self else { return }
+                        switch state {
+                        case .ready:
+                            self.attachPeer(newConn)
+                            self.listener?.cancel()
+                            self.listener = nil
+                        case .failed(let err):
+                            self.connectionStateSubject.send(.failed(err.localizedDescription))
+                            self.closePeerQuietly()
+                            self.cleanupListenerOnly()
+                        case .cancelled:
+                            self.connectionStateSubject.send(.disconnected)
+                            self.closePeerQuietly()
+                            self.cleanupListenerOnly()
+                        default:
+                            break
+                        }
+                    }
+                    newConn.start(queue: self.queue)
                 }
 
                 listener.stateUpdateHandler = { [weak self] state in
