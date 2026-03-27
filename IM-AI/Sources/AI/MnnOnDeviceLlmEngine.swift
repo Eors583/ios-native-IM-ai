@@ -10,6 +10,11 @@ final class MnnOnDeviceLlmEngine {
     private var wrapper: LLMInferenceEngineWrapper?
     private let modelDir: URL
 
+    struct StreamStats {
+        let chunkCount: Int
+        let elapsedMs: Int64
+    }
+
     init(modelDirectory: URL) {
         modelDir = modelDirectory
     }
@@ -40,18 +45,37 @@ final class MnnOnDeviceLlmEngine {
     }
 
     /// 流式生成；结束标记 `<eop>` / `<stoped>` 由封装层传入，此处过滤，不交给 UI。
-    func streamAnswer(prompt: String, onToken: @escaping (String) -> Void) async {
-        guard let w = wrapper else { return }
+    @discardableResult
+    func streamAnswer(prompt: String, onToken: @escaping (String) -> Void) async -> StreamStats {
+        guard let w = wrapper else { return .init(chunkCount: 0, elapsedMs: 0) }
+        let started = Date()
+        var chunkCount = 0
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
+            final class ResumeOnce {
+                private var resumed = false
+                private let lock = NSLock()
+                func tryResume(_ cont: CheckedContinuation<Void, Never>) -> Bool {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    if resumed { return false }
+                    resumed = true
+                    cont.resume()
+                    return true
+                }
+            }
+            let resumeOnce = ResumeOnce()
             w.clearChatHistory()
             w.processInput(prompt) { token in
                 if token == "<eop>" || token == "<stoped>" {
-                    cont.resume()
+                    _ = resumeOnce.tryResume(cont)
                     return
                 }
+                chunkCount += 1
                 onToken(token)
             }
         }
+        let elapsed = Int64(Date().timeIntervalSince(started) * 1000.0)
+        return .init(chunkCount: chunkCount, elapsedMs: max(0, elapsed))
     }
 
     private func applyMergedConfigs() {
