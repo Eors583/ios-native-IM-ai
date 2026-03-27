@@ -1,0 +1,10 @@
+.DS_Store
+**/.DS_Store
+
+**/xcuserdata/
+**/*.xcuserstate
+**/*.xcworkspace/xcuserdata/
+**/*.xcodeproj/xcuserdata/
+
+IM-AI/Frameworks/MNN.framework/
+IM-AI/Frameworks/MNN.xcframework/

@@ -1,0 +1,9 @@
+将构建产物 MNN.xcframework 放到本目录，路径应为：
+
+  apps/ios/IM-AI/Frameworks/MNN.xcframework
+
+推荐直接执行仓库脚本（需已安装 cmake、Xcode 命令行工具）：
+
+  /Users/chuzu/IM-MNN-Project/tools/build_mnn_ios.sh
+
+脚本会自动构建 iOS arm64 + iOS Simulator arm64 两个 slice，并打包成 MNN.xcframework。
