@@ -87,6 +87,12 @@ struct AiChatView: View {
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
             }
+            // 流式生成时内容会不断更新（messages.count 不变），这里用节流后的 nonce 触发跟随滚动
+            .onChange(of: vm.scrollToBottomNonce) { _, _ in
+                withAnimation(.easeOut(duration: 0.12)) {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
         }
     }
 
@@ -104,15 +110,20 @@ struct AiChatView: View {
     }
 
     private var errorBanner: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 4) {
             if let err = vm.error {
                 Text(err)
                     .font(.footnote)
                     .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
+            }
+            if let stats = vm.generationStats {
+                Text(stats)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
     }
 
     private var inputBar: some View {
@@ -202,6 +213,10 @@ final class EmbeddedAiChatViewModel: ObservableObject {
     @Published var input: String = ""
     @Published var isGenerating: Bool = false
     @Published var error: String? = nil
+    @Published var generationStats: String? = nil
+    @Published var scrollToBottomNonce: Int = 0
+
+    private var pendingScrollTask: Task<Void, Never>?
 
     @Published var availableModels: [OnDeviceModelOption] = []
     @Published var selectedModelId: String = ""
@@ -314,6 +329,7 @@ final class EmbeddedAiChatViewModel: ObservableObject {
         let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !q.isEmpty, !isGenerating else { return }
         error = nil
+        generationStats = nil
 
         messages.append(.init(id: UUID().uuidString, content: q, fromUser: true))
         input = ""
@@ -345,9 +361,21 @@ final class EmbeddedAiChatViewModel: ObservableObject {
                     return
                 }
                 let prompt = Self.buildPromptWithSoul(userQuestion: q)
-                await engine.streamAnswer(prompt: prompt) { token in
-                    self.appendOrSetLastAssistantText(token)
+                let reducer = ThinkStreamReducer()
+                let stats = await engine.streamAnswer(prompt: prompt) { token in
+                    let visible = reducer.consume(token)
+                    if !visible.isEmpty {
+                        self.appendOrSetLastAssistantText(visible)
+                    }
                 }
+                let tail = reducer.finish()
+                if !tail.isEmpty {
+                    self.appendOrSetLastAssistantText(tail)
+                }
+                if self.messages.last?.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+                    self.messages[self.messages.count - 1].content = "抱歉，我这次没有生成有效回答。"
+                }
+                self.generationStats = "片段: \(stats.chunkCount) · 可见字符: \(reducer.visibleCharCount) · 思考字符(已隐藏): \(reducer.thinkCharCount) · 用时: \(stats.elapsedMs)ms"
             } catch {
                 self.error = error.localizedDescription
                 self.appendOrSetLastAssistantText("推理失败：\(error.localizedDescription)")
@@ -407,12 +435,99 @@ final class EmbeddedAiChatViewModel: ObservableObject {
     private func appendOrSetLastAssistantText(_ text: String) {
         guard let lastIdx = messages.lastIndex(where: { !$0.fromUser }) else {
             messages.append(.init(id: UUID().uuidString, content: text, fromUser: false))
+            scheduleScrollToBottom()
             return
         }
         if messages[lastIdx].content.isEmpty {
             messages[lastIdx].content = text
         } else {
             messages[lastIdx].content += text
+        }
+        scheduleScrollToBottom()
+    }
+
+    private func scheduleScrollToBottom() {
+        pendingScrollTask?.cancel()
+        pendingScrollTask = Task { @MainActor [weak self] in
+            // 轻量节流：把连续 token 合并成一次滚动，避免卡顿
+            try? await Task.sleep(nanoseconds: 60_000_000) // 60ms
+            self?.scrollToBottomNonce &+= 1
+        }
+    }
+
+    /// 处理流式输出中的 `<think>...</think>`：
+    /// - 流式阶段不占屏展示思考内容
+    /// - 结束后仅保留最终回答
+    private final class ThinkStreamReducer {
+        private var buffer = ""
+        private var inThink = false
+
+        private(set) var visibleCharCount = 0
+        private(set) var thinkCharCount = 0
+
+        func consume(_ chunk: String) -> String {
+            buffer += chunk
+            return drain(flushAllVisible: false)
+        }
+
+        func finish() -> String {
+            return drain(flushAllVisible: true)
+        }
+
+        private func drain(flushAllVisible: Bool) -> String {
+            var output = ""
+
+            while !buffer.isEmpty {
+                if inThink {
+                    if let r = buffer.range(of: "</think>", options: [.caseInsensitive, .literal]) {
+                        let hidden = String(buffer[..<r.lowerBound])
+                        thinkCharCount += hidden.count
+                        buffer.removeSubrange(..<r.upperBound)
+                        inThink = false
+                        continue
+                    }
+                    if flushAllVisible {
+                        thinkCharCount += buffer.count
+                        buffer.removeAll(keepingCapacity: true)
+                    } else {
+                        let hold = min(8, buffer.count)
+                        let consumeCount = max(0, buffer.count - hold)
+                        if consumeCount > 0 {
+                            thinkCharCount += consumeCount
+                            buffer.removeFirst(consumeCount)
+                        } else {
+                            break
+                        }
+                    }
+                } else {
+                    if let r = buffer.range(of: "<think>", options: [.caseInsensitive, .literal]) {
+                        let visible = String(buffer[..<r.lowerBound])
+                        output += visible
+                        visibleCharCount += visible.count
+                        buffer.removeSubrange(..<r.upperBound)
+                        inThink = true
+                        continue
+                    }
+                    if flushAllVisible {
+                        output += buffer
+                        visibleCharCount += buffer.count
+                        buffer.removeAll(keepingCapacity: true)
+                    } else {
+                        let hold = min(7, buffer.count)
+                        let emitCount = max(0, buffer.count - hold)
+                        if emitCount > 0 {
+                            let endIdx = buffer.index(buffer.startIndex, offsetBy: emitCount)
+                            let visible = String(buffer[..<endIdx])
+                            output += visible
+                            visibleCharCount += visible.count
+                            buffer.removeSubrange(..<endIdx)
+                        } else {
+                            break
+                        }
+                    }
+                }
+            }
+            return output
         }
     }
 }
