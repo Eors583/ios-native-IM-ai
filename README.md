@@ -4,6 +4,16 @@
 
 > 说明：当前 iOS 端尚未开始编码。本 README 的定位是“复刻施工说明书”：你在 macOS 上用 vibecoding 复刻 Android 产品时，直接按这里的清单与约束落地即可。
 
+## 界面展示
+
+![界面展示](./project-readme/home.png)
+
+![界面展示](./project-readme/chatroom.png)
+
+![界面展示](./project-readme/aichat.png)
+
+![界面展示](./project-readme/me.png)
+
 ## 产品能力（与 Android 对齐）
 
 - **局域网 IM**：同一 Wi‑Fi 下点对点 TCP 通信（设备 A 当服务端，设备 B 连接 IP）
